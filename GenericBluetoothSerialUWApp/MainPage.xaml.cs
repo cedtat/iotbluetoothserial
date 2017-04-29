@@ -21,6 +21,7 @@ using Windows.UI.Popups;
 using System.Threading.Tasks;
 using System.Threading;
 using System.Text;
+using ninpo.communication;
 
 
 // The Blank Page item template is documented at http://go.microsoft.com/fwlink/?LinkId=402352&clcid=0x409
@@ -33,122 +34,42 @@ namespace GenericBluetoothSerialUWApp
     public sealed partial class MainPage : Page
     {
         string Title = "Generic Bluetooth Serial Universal Windows App";
-        private Windows.Devices.Bluetooth.Rfcomm.RfcommDeviceService _service;
-        private StreamSocket _socket;
-        private DataWriter dataWriterObject;
-        private DataReader dataReaderObject;
+        bool isConnected = false;
         ObservableCollection<PairedDeviceInfo> _pairedDevices;
-        private CancellationTokenSource ReadCancellationTokenSource;
-
 
         public MainPage()
         {
             this.InitializeComponent();
             MyTitle.Text = Title;
-            InitializeRfcommDeviceService();
+            Initialize();
         }
 
-
-        async void InitializeRfcommDeviceService()
+        async void Initialize()
         {
-            try
-            {
-                DeviceInformationCollection DeviceInfoCollection = await DeviceInformation.FindAllAsync(RfcommDeviceService.GetDeviceSelector(RfcommServiceId.SerialPort));
-
-
-                var numDevices = DeviceInfoCollection.Count();
-
-                // By clearing the backing data, we are effectively clearing the ListBox
-                _pairedDevices = new ObservableCollection<PairedDeviceInfo>();
-                _pairedDevices.Clear();
-
-                if (numDevices == 0)
-                {
-                    //MessageDialog md = new MessageDialog("No paired devices found", "Title");
-                    //await md.ShowAsync();
-                    System.Diagnostics.Debug.WriteLine("InitializeRfcommDeviceService: No paired devices found.");
-                }
-                else
-                {
-                    // Found paired devices.
-                    foreach (var deviceInfo in DeviceInfoCollection)
-                    {
-                        _pairedDevices.Add(new PairedDeviceInfo(deviceInfo));
-                    }
-                }
-                PairedDevices.Source = _pairedDevices;
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("InitializeRfcommDeviceService: " + ex.Message);
-            }
+            _pairedDevices = await BluetoothSerial.Instance.InitializeRfcommDeviceService();
+            PairedDevices.Source = _pairedDevices;
         }
-
-        async private void ConnectDevice_Click(object sender, RoutedEventArgs e)
-        {
-            //Revision: No need to requery for Device Information as we alraedy have it:
-            DeviceInformation DeviceInfo; // = await DeviceInformation.CreateFromIdAsync(this.TxtBlock_SelectedID.Text);
-            PairedDeviceInfo pairedDevice = (PairedDeviceInfo)ConnectDevices.SelectedItem;
-            DeviceInfo = pairedDevice.DeviceInfo;
-
-            bool success = true;
-            try
-            {
-                _service = await RfcommDeviceService.FromIdAsync(DeviceInfo.Id);
-
-                if (_socket != null)
-                {
-                    // Disposing the socket with close it and release all resources associated with the socket
-                    _socket.Dispose();
-                }
-
-                _socket = new StreamSocket();
-                try { 
-                    // Note: If either parameter is null or empty, the call will throw an exception
-                    await _socket.ConnectAsync(_service.ConnectionHostName, _service.ConnectionServiceName);
-                }
-                catch (Exception ex)
-                {
-                        success = false;
-                        System.Diagnostics.Debug.WriteLine("Connect:" + ex.Message);
-                }
-                // If the connection was successful, the RemoteAddress field will be populated
-                if (success)
-                {
-                    this.buttonDisconnect.IsEnabled = true;
-                    this.buttonSend.IsEnabled = true;
-                    this.buttonStartRecv.IsEnabled = true;
-                    this.buttonStopRecv.IsEnabled = false;
-                    string msg = String.Format("Connected to {0}!", _socket.Information.RemoteAddress.DisplayName);
-                    //MessageDialog md = new MessageDialog(msg, Title);
-                    System.Diagnostics.Debug.WriteLine(msg);
-                    //await md.ShowAsync();
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("Overall Connect: " +ex.Message);
-                _socket.Dispose();
-                _socket = null;
-            }
-        }
-
-
-
-
-
-
-        private void ConnectDevices_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+     
+        private async void ConnectDevices_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
         {
             PairedDeviceInfo pairedDevice = (PairedDeviceInfo)ConnectDevices.SelectedItem;
             this.TxtBlock_SelectedID.Text = pairedDevice.ID;
             this.textBlockBTName.Text = pairedDevice.Name;
-            ConnectDevice_Click(sender, e);
+
+            isConnected = await BluetoothSerial.Instance.ConnectDevice(pairedDevice);
+
+            if (isConnected)
+            {
+                this.buttonDisconnect.IsEnabled = true;
+                this.buttonSend.IsEnabled = true;
+                this.buttonStartRecv.IsEnabled = true;
+                this.buttonStopRecv.IsEnabled = false;
+
+                string msg = String.Format("Connected to {0}!", pairedDevice.DeviceInfo.Name);
+                System.Diagnostics.Debug.WriteLine(msg);
+            }
         }
 
-        //Windows.Storage.Streams.Buffer InBuff;
-        //Windows.Storage.Streams.Buffer OutBuff;
-        //private StreamSocket _socket;
         private async void button_Click(object sender, RoutedEventArgs e)
         {
             //OutBuff = new Windows.Storage.Streams.Buffer(100);
@@ -158,9 +79,7 @@ namespace GenericBluetoothSerialUWApp
                 switch ((string)button.Content)
                 {
                     case "Disconnect":
-                        await this._socket.CancelIOAsync();
-                        _socket.Dispose();
-                        _socket = null;
+                        BluetoothSerial.Instance.Disconnect();
                         this.textBlockBTName.Text = "";
                         this.TxtBlock_SelectedID.Text = "";
                         this.buttonDisconnect.IsEnabled = false;
@@ -170,7 +89,7 @@ namespace GenericBluetoothSerialUWApp
                         break;
                     case "Send":
                         //await _socket.OutputStream.WriteAsync(OutBuff);
-                        Send(this.textBoxSendText.Text);
+                        BluetoothSerial.Instance.Send(this.textBoxSendText.Text);
                         this.textBoxSendText.Text = "";
                         break;
                     case "Clear Send":
@@ -184,108 +103,21 @@ namespace GenericBluetoothSerialUWApp
                     case "Stop Recv":
                         this.buttonStartRecv.IsEnabled = false;
                         this.buttonStopRecv.IsEnabled = false;
-                        CancelReadTask();
+                        BluetoothSerial.Instance.CancelReadTask();
                         break;
                     case "Refresh":
-                        InitializeRfcommDeviceService();
+                        PairedDevices.Source = BluetoothSerial.Instance.InitializeRfcommDeviceService();
                         break;
                 }
             }
         }
 
-
-        public async void Send(string msg)
-        {
-            try
-            {
-                if (_socket.OutputStream != null)
-                {
-                    // Create the DataWriter object and attach to OutputStream
-                    dataWriterObject = new DataWriter(_socket.OutputStream);
-
-                    //Launch the WriteAsync task to perform the write
-                    await WriteAsync(msg);
-                }
-                else
-                {
-                    //status.Text = "Select a device and connect";
-                }
-            }
-            catch (Exception ex)
-            {
-                //status.Text = "Send(): " + ex.Message;
-                System.Diagnostics.Debug.WriteLine("Send(): " + ex.Message);
-            }
-            finally
-            {
-                // Cleanup once complete
-                if (dataWriterObject != null)
-                {
-                    dataWriterObject.DetachStream();
-                    dataWriterObject = null;
-                }
-            }
-        }
-
-        /// <summary>
-        /// WriteAsync: Task that asynchronously writes data from the input text box 'sendText' to the OutputStream 
-        /// </summary>
-        /// <returns></returns>
-        private async Task WriteAsync(string msg)
-        {
-            Task<UInt32> storeAsyncTask;
-
-            if (msg == "")
-                msg = "none";// sendText.Text;
-            if (msg.Length != 0)
-            //if (msg.sendText.Text.Length != 0)
-            {
-                // Load the text from the sendText input text box to the dataWriter object
-                dataWriterObject.WriteString(msg);
-                
-                // Launch an async task to complete the write operation
-                storeAsyncTask = dataWriterObject.StoreAsync().AsTask();
-
-                UInt32 bytesWritten = await storeAsyncTask;
-                if (bytesWritten > 0)
-                {
-                    string status_Text = msg + ", ";
-                    status_Text += bytesWritten.ToString();
-                    status_Text += " bytes written successfully!";
-                    System.Diagnostics.Debug.WriteLine(status_Text);
-                }
-            }
-            else
-            {
-                string status_Text2 = "Enter the text you want to write and then click on 'WRITE'";
-                System.Diagnostics.Debug.WriteLine(status_Text2);
-            }
-        }
-
-  
-
-        /// <summary>
-        /// - Create a DataReader object
-        /// - Create an async task to read from the SerialDevice InputStream
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
+            
         private async void Listen()
         {
             try
             {
-                ReadCancellationTokenSource = new CancellationTokenSource();
-                if (_socket.InputStream != null)
-                {
-                    dataReaderObject = new DataReader(_socket.InputStream);
-                    this.buttonStopRecv.IsEnabled = true;
-                    this.buttonDisconnect.IsEnabled = false;
-                    // keep reading the serial input
-                    while (true)
-                    {                 
-                        await ReadAsync(ReadCancellationTokenSource.Token);
-                    }
-                }
+                await BluetoothSerial.Instance.Listen(ListenCallback);
             }
             catch (Exception ex)
             {
@@ -297,115 +129,20 @@ namespace GenericBluetoothSerialUWApp
                 this.TxtBlock_SelectedID.Text = "";
                 if (ex.GetType().Name == "TaskCanceledException")
                 {
-                    System.Diagnostics.Debug.WriteLine( "Listen: Reading task was cancelled, closing device and cleaning up");
+                    System.Diagnostics.Debug.WriteLine("Listen: Reading task was cancelled, closing device and cleaning up");
                 }
                 else
                 {
-                    System.Diagnostics.Debug.WriteLine("Listen: " +ex.Message);
+                    System.Diagnostics.Debug.WriteLine("Listen: " + ex.Message);
                 }
             }
-            finally
-            {
-                // Cleanup once complete
-                if (dataReaderObject != null)
-                {
-                    dataReaderObject.DetachStream();
-                    dataReaderObject = null;
-                }
-            }
+
         }
 
-        /// <summary>
-        /// ReadAsync: Task that waits on data and reads asynchronously from the serial device InputStream
-        /// </summary>
-        /// <param name="cancellationToken"></param>
-        /// <returns></returns>
-        private async Task ReadAsync(CancellationToken cancellationToken)
+        private void ListenCallback(string result)
         {
-            Task<UInt32> loadAsyncTask;
-
-            uint ReadBufferLength = 1024;
-
-            // If task cancellation was requested, comply
-            cancellationToken.ThrowIfCancellationRequested();
-
-            // Set InputStreamOptions to complete the asynchronous read operation when one or more bytes is available
-            dataReaderObject.InputStreamOptions = InputStreamOptions.Partial;
-
-            // Create a task object to wait for data on the serialPort.InputStream
-            loadAsyncTask = dataReaderObject.LoadAsync(ReadBufferLength).AsTask(cancellationToken);
-
-            // Launch the task and wait
-            UInt32 bytesRead = await loadAsyncTask;
-            if (bytesRead > 0)
-            {
-                try
-                {
-                    string recvdtxt = dataReaderObject.ReadString(bytesRead);
-                    System.Diagnostics.Debug.WriteLine(recvdtxt);
-                    this.textBoxRecvdText.Text += recvdtxt;
-                    /*if (_Mode == Mode.JustConnected)
-                    {
-                        if (recvdtxt[0] == ArduinoLCDDisplay.keypad.BUTTON_SELECT_CHAR)
-                        {
-                            _Mode = Mode.Connected;
-
-                            //Reset back to Cmd = Read sensor and First Sensor
-                            await Globals.MP.UpdateText("@");
-                            //LCD Display: Fist sensor and first comamnd
-                            string lcdMsg = "~C" + Commands.Sensors[0];
-                            lcdMsg += "~" + ArduinoLCDDisplay.LCD.CMD_DISPLAY_LINE_2_CH + Commands.CommandActions[1] + "           ";
-                            Send(lcdMsg);
-
-                            backButton_Click(null, null);
-                        }
-                    }
-                    else if (_Mode == Mode.Connected)
-                    {
-                        await Globals.MP.UpdateText(recvdtxt);
-                        recvdText.Text = "";
-                        status.Text = "bytes read successfully!";
-                    }*/
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine("ReadAsync: " + ex.Message);
-                }
-                
-            }
+            this.textBoxRecvdText.Text += result;
         }
-
-        /// <summary>
-        /// CancelReadTask:
-        /// - Uses the ReadCancellationTokenSource to cancel read operations
-        /// </summary>
-        private void CancelReadTask()
-        {
-            if (ReadCancellationTokenSource != null)
-            {
-                if (!ReadCancellationTokenSource.IsCancellationRequested)
-                {
-                    ReadCancellationTokenSource.Cancel();
-                }
-            }
-        }
-
-
-        /// <summary>
-        ///  Class to hold all paired device information
-        /// </summary>
-        public class PairedDeviceInfo
-        {
-            internal PairedDeviceInfo(DeviceInformation deviceInfo)
-            {
-                this.DeviceInfo = deviceInfo;
-                this.ID = this.DeviceInfo.Id;
-                this.Name = this.DeviceInfo.Name;
-            }
-
-            public string Name { get; private set; }
-            public string ID { get; private set; }
-            public DeviceInformation DeviceInfo { get; private set; }
-        }
+        
     }
 }
